@@ -1,0 +1,413 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=1320" />
+<title>Parts Logger — Marine SOP</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<div id="root"></div>
+
+<!-- Speaker notes placeholder NOT needed — this is an interactive prototype -->
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+<script type="text/babel" src="android-frame.jsx"></script>
+<script type="text/babel" src="icons.jsx"></script>
+<script type="text/babel" src="data.jsx"></script>
+<script type="text/babel" src="screens.jsx"></script>
+
+<script type="text/babel">
+const { useState, useEffect, useMemo } = React;
+
+// Tweaks defaults — persisted via edit-mode protocol
+const TWEAKS = /*EDITMODE-BEGIN*/{
+  "language": "en",
+  "online": true
+}/*EDITMODE-END*/;
+
+const STEPS = ['home', 'scan', 'scan_match', 'qty', 'log', 'search', 'unknown', 'submit'];
+
+function App() {
+  // Persisted UI state
+  const stored = JSON.parse(localStorage.getItem('parts-logger-state') || '{}');
+  const [step, setStep] = useState(stored.step || 'home');
+  const [log, setLog] = useState(stored.log || [
+    { code: 'SIKA-291-BLK', name: 'Sikaflex-291 Black 300ml', qty: 2, uom: 'ea' },
+  ]);
+  const [lang, setLang] = useState(stored.lang || TWEAKS.language);
+  const [online, setOnline] = useState(stored.online ?? TWEAKS.online);
+  const [pending, setPending] = useState(null); // product being qty'd
+  const [tweaksOpen, setTweaksOpen] = useState(false);
+
+  // persist
+  useEffect(() => {
+    localStorage.setItem('parts-logger-state', JSON.stringify({ step, log, lang, online }));
+  }, [step, log, lang, online]);
+
+  // Edit-mode protocol
+  useEffect(() => {
+    const handler = (e) => {
+      if (!e.data) return;
+      if (e.data.type === '__activate_edit_mode') setTweaksOpen(true);
+      if (e.data.type === '__deactivate_edit_mode') setTweaksOpen(false);
+    };
+    window.addEventListener('message', handler);
+    window.parent.postMessage({ type: '__edit_mode_available' }, '*');
+    return () => window.removeEventListener('message', handler);
+  }, []);
+
+  const persist = (edits) => {
+    window.parent.postMessage({ type: '__edit_mode_set_keys', edits }, '*');
+  };
+
+  const t = I18N[lang];
+
+  // Screen router
+  let screen;
+  switch (step) {
+    case 'home':
+      screen = (
+        <HomeScreen
+          lang={lang} online={online} log={log}
+          onScan={() => setStep('scan')}
+          onSearch={() => setStep('search')}
+          onUnknown={() => setStep('unknown')}
+          onSubmit={() => setStep('submit')}
+        />
+      );
+      break;
+    case 'scan':
+      screen = (
+        <ScanScreen
+          lang={lang} online={online}
+          onBack={() => setStep('home')}
+          onDetect={(product) => { setPending(product); setStep('scan_match'); }}
+        />
+      );
+      break;
+    case 'scan_match':
+      screen = (
+        <MatchScreen
+          lang={lang} online={online} product={pending || CATALOG[0]}
+          onBack={() => setStep('scan')}
+          onConfirm={() => setStep('qty')}
+        />
+      );
+      break;
+    case 'qty':
+      screen = (
+        <QtyScreen
+          lang={lang} online={online} product={pending || CATALOG[0]}
+          onBack={() => setStep('scan_match')}
+          onSave={(qty) => {
+            const p = pending || CATALOG[0];
+            setLog([...log, { code: p.code, name: p.name, qty, uom: p.uom }]);
+            setPending(null);
+            setStep('home');
+          }}
+        />
+      );
+      break;
+    case 'search':
+      screen = (
+        <SearchScreen
+          lang={lang} online={online}
+          onBack={() => setStep('home')}
+          onPick={(p) => { setPending(p); setStep('scan_match'); }}
+        />
+      );
+      break;
+    case 'unknown':
+      screen = (
+        <UnknownScreen
+          lang={lang} online={online}
+          onBack={() => setStep('home')}
+          onSave={(entry) => { setLog([...log, entry]); setStep('home'); }}
+        />
+      );
+      break;
+    case 'submit':
+      screen = (
+        <SubmitScreen
+          lang={lang} online={online} itemCount={log.length}
+          onDone={() => {
+            setLog([]);
+            setStep('home');
+          }}
+        />
+      );
+      break;
+    default:
+      screen = <HomeScreen lang={lang} online={online} log={log} onScan={() => setStep('scan')} onSearch={() => setStep('search')} onUnknown={() => setStep('unknown')} onSubmit={() => setStep('submit')} />;
+  }
+
+  // SOP steps mapped to screens
+  const activeSopId = (() => {
+    if (step === 'home' && log.length === 0) return 'home';
+    if (step === 'home' && log.length > 0) return 'log';
+    if (step === 'scan') return 'scan';
+    if (step === 'scan_match') return 'scan_match';
+    if (step === 'qty') return 'qty';
+    if (step === 'search') return 'search';
+    if (step === 'unknown') return 'unknown';
+    if (step === 'submit') return 'submit';
+    return 'home';
+  })();
+
+  const jumpFromSop = (id) => {
+    if (id === 'home' || id === 'log') setStep('home');
+    else if (id === 'scan') setStep('scan');
+    else if (id === 'scan_match') { setPending(CATALOG[0]); setStep('scan_match'); }
+    else if (id === 'qty') { setPending(CATALOG[0]); setStep('qty'); }
+    else if (id === 'search') setStep('search');
+    else if (id === 'unknown') setStep('unknown');
+    else if (id === 'submit') setStep('submit');
+  };
+
+  // Excel preview rows (for scheduler panel)
+  const PRICE_LOOKUP = Object.fromEntries(CATALOG.map(p => [p.code, p.price]));
+  const excelRows = log.map((r, i) => {
+    const price = PRICE_LOOKUP[r.code] ?? 0;
+    return {
+      row: i + 2,
+      date: '2026-04-23',
+      tech: 'Hafifi',
+      boat: 'SV Sula',
+      code: r.code,
+      name: r.name,
+      qty: r.qty,
+      uom: r.uom || 'ea',
+      price,
+      total: price * r.qty,
+    };
+  });
+
+  // Step counter
+  const stepIdx = STEPS.indexOf(activeSopId === 'log' ? 'home' : activeSopId);
+  const stepNum = stepIdx < 0 ? 1 : stepIdx + 1;
+
+  return (
+    <div>
+      {/* Doc header */}
+      <div className="doc-header">
+        <div style={{ display: 'flex', gap: 20, alignItems: 'flex-start' }}>
+          <img
+            src="assets/msa-logo.png"
+            alt="Marine Supplies Asia"
+            style={{
+              width: 120, height: 'auto', flexShrink: 0,
+              marginTop: 2,
+              filter: 'drop-shadow(0 2px 6px rgba(11,42,59,0.12))',
+            }}
+          />
+          <div style={{ borderLeft: '1px solid rgba(11,42,59,0.15)', paddingLeft: 20 }}>
+            <div className="chip navy" style={{ marginBottom: 10 }}>
+              <svg width="10" height="10" viewBox="0 0 10 10"><circle cx="5" cy="5" r="4" fill="#B8894D"/></svg>
+              INTERNAL SOP · v0.1
+            </div>
+            <h1>{t.sop_title}</h1>
+            <div className="sub">{t.sop_sub}</div>
+          </div>
+        </div>
+        <div className="meta">
+          <div className="row"><span className="k">DEVICE</span><span className="v">Android (APK)</span></div>
+          <div className="row"><span className="k">PLATFORM</span><span className="v">AppSheet</span></div>
+          <div className="row"><span className="k">BACKEND</span><span className="v">MarineOps.xlsx</span></div>
+          <div className="row"><span className="k">TAP-THROUGH</span><span className="v">LIVE</span></div>
+        </div>
+      </div>
+
+      {/* Stage */}
+      <div className="stage">
+        {/* Phone column */}
+        <div className="phone-col">
+          <div className="phone-controls">
+            <div className="lang-toggle" title="Language">
+              <button className={lang === 'en' ? 'on' : ''} onClick={() => { setLang('en'); persist({ language: 'en' }); }}>EN</button>
+              <button className={lang === 'ms' ? 'on' : ''} onClick={() => { setLang('ms'); persist({ language: 'ms' }); }}>MS</button>
+            </div>
+            <div style={{ width: 1, height: 18, background: 'rgba(255,255,255,0.15)' }} />
+            <button
+              onClick={() => { setOnline(!online); persist({ online: !online }); }}
+              style={{
+                appearance: 'none', border: 'none',
+                background: online ? 'rgba(31,138,76,0.25)' : 'rgba(199,122,30,0.3)',
+                color: 'var(--cream)',
+                padding: '4px 10px', borderRadius: 100, cursor: 'pointer',
+                fontFamily: 'JetBrains Mono, monospace', fontSize: 10, fontWeight: 600,
+                letterSpacing: 0.5,
+              }}
+              title="Toggle sync state"
+            >{online ? '● ONLINE' : '◐ OFFLINE'}</button>
+            <div style={{ flex: 1 }} />
+            <div className="step-nav">
+              <button
+                onClick={() => {
+                  const i = Math.max(0, STEPS.indexOf(step) - 1);
+                  setStep(STEPS[i]);
+                }}
+                title="Prev step"
+              >
+                <I.Arrow size={14} color="#F5EEDC" />
+              </button>
+              <div className="step-counter">{String(stepNum).padStart(2, '0')} / {STEPS.length}</div>
+              <button
+                onClick={() => {
+                  const i = Math.min(STEPS.length - 1, STEPS.indexOf(step) + 1);
+                  setStep(STEPS[i]);
+                }}
+                title="Next step"
+              >
+                <I.Arrow size={14} color="#F5EEDC" style={{ transform: 'rotate(180deg)' }}/>
+              </button>
+            </div>
+          </div>
+
+          <AndroidDevice width={412} height={844}>
+            {screen}
+          </AndroidDevice>
+
+          <div style={{ fontSize: 11, fontFamily: 'JetBrains Mono, monospace', color: 'var(--ink-3)', letterSpacing: 1, textAlign: 'center' }}>
+            TAP ANY ELEMENT · PROTOTYPE IS INTERACTIVE
+          </div>
+        </div>
+
+        {/* SOP column */}
+        <div className="sop-col">
+          <div>
+            <h2>
+              {lang === 'ms' ? 'Aliran Kerja' : 'Workflow'}
+              <span className="tag">{STEPS.length} STEPS</span>
+            </h2>
+            <div style={{ fontSize: 13, color: 'var(--ink-2)', marginTop: 4 }}>
+              {lang === 'ms'
+                ? 'Klik mana-mana langkah untuk lompat ke skrin itu di telefon.'
+                : 'Click any step to jump to that screen on the phone.'}
+            </div>
+          </div>
+
+          <div className="sop-list">
+            {SOP_STEPS.map((s, i) => (
+              <div
+                key={s.id}
+                className={`sop-step ${activeSopId === s.id ? 'active' : ''}`}
+                onClick={() => jumpFromSop(s.id)}
+              >
+                <div className="num">{String(i + 1).padStart(2, '0')}</div>
+                <div style={{ flex: 1 }}>
+                  <div className="step-title">{s.title}</div>
+                  <div className="step-desc">{s.desc}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Scheduler's Excel preview */}
+          <div className="sop-excel">
+            <h2 style={{ marginBottom: 10 }}>
+              {lang === 'ms' ? 'Pandangan Penjadual' : 'Scheduler\'s view'}
+              <span className="tag">PROJECT USAGE · XLSX</span>
+            </h2>
+            <div style={{ fontSize: 13, color: 'var(--ink-2)', margin: '0 0 12px' }}>
+              {lang === 'ms'
+                ? 'Setiap item terus tulis ke sini. Muat turun untuk invois.'
+                : 'Every scan writes here. Download and drop into the billing tool.'}
+            </div>
+
+            <div className="xl-window">
+              <div className="xl-titlebar">
+                <div className="x-logo">X</div>
+                MarineOps.xlsx — ProjectUsage
+                <div style={{ flex: 1 }} />
+                <button
+                  style={{
+                    appearance: 'none', border: 'none',
+                    background: 'rgba(255,255,255,0.2)', color: '#fff',
+                    padding: '4px 10px', borderRadius: 4,
+                    fontSize: 11, fontWeight: 600, cursor: 'pointer',
+                    display: 'inline-flex', alignItems: 'center', gap: 6,
+                  }}
+                >
+                  <I.Download size={12} color="#fff" /> Download .xlsx
+                </button>
+              </div>
+              <div className="xl-grid">
+                <div className="xl-row head">
+                  <div></div>
+                  <div>A · Date</div>
+                  <div>B · Technicians</div>
+                  <div>C · ProductName</div>
+                  <div>D · Product code</div>
+                  <div>E · qty</div>
+                  <div>F · uom</div>
+                </div>
+                <div className="xl-row">
+                  <div>1</div>
+                  <div colSpan={6} style={{ gridColumn: '2 / -1', fontStyle: 'italic', color: '#888', background: '#fafafa' }}>
+                    — headers —
+                  </div>
+                </div>
+                {excelRows.length === 0 && (
+                  <div className="xl-row">
+                    <div>2</div>
+                    <div style={{ gridColumn: '2 / -1', color: '#bbb', fontStyle: 'italic' }}>
+                      (empty — scan an item on the phone)
+                    </div>
+                  </div>
+                )}
+                {excelRows.map((r, i) => (
+                  <div key={i} className={`xl-row ${i === excelRows.length - 1 ? 'new' : ''}`}>
+                    <div>{r.row}</div>
+                    <div>{r.date}</div>
+                    <div>{r.tech}</div>
+                    <div title={r.name} style={{ fontSize: 10.5 }}>{r.name}</div>
+                    <div className="mono" title={r.code} style={{ fontSize: 10.5, color: '#0B2A3B', fontWeight: 600 }}>{r.code}</div>
+                    <div style={{ textAlign: 'right' }}>{r.qty}</div>
+                    <div>{r.uom}</div>
+                  </div>
+                ))}
+                {/* Trailing blank rows for visual */}
+                {excelRows.length > 0 && excelRows.length < 4 && [...Array(4 - excelRows.length)].map((_, i) => (
+                  <div key={'blank-'+i} className="xl-row">
+                    <div>{excelRows.length + 2 + i}</div>
+                    <div style={{ gridColumn: '2 / -1' }}></div>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div style={{ fontSize: 11, color: 'var(--ink-3)', marginTop: 8, fontFamily: 'JetBrains Mono, monospace', letterSpacing: 0.3 }}>
+              ↳ {lang === 'ms' ? 'Drop fail .xlsx ini ke Claude → dapat draf invois' : 'Drop this .xlsx into Claude → get an invoice draft'}
+            </div>
+          </div>
+
+          {/* Why AppSheet callout */}
+          <div className="card" style={{ background: 'var(--navy)', color: 'var(--cream)', borderColor: 'transparent' }}>
+            <div style={{ fontSize: 10, letterSpacing: 1.5, textTransform: 'uppercase', opacity: 0.6, marginBottom: 8 }}>
+              {lang === 'ms' ? 'Kenapa AppSheet' : 'Why AppSheet for this build'}
+            </div>
+            <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13, lineHeight: 1.6 }}>
+              <li>{lang === 'ms' ? 'Imbas barcode natif + mod luar talian (selalu ada signal lemah di marina)' : 'Native barcode scan + proper offline mode (marinas = weak signal)'}</li>
+              <li>{lang === 'ms' ? 'Terus sambung ke Excel / OneDrive tanpa kod' : 'Direct Excel / OneDrive binding, no code'}</li>
+              <li>{lang === 'ms' ? 'Boleh eksport APK Android sebenar' : 'Exports a real Android APK'}</li>
+              <li>{lang === 'ms' ? 'Percuma sehingga 10 pengguna · ~RM 20/bulan selepas itu' : 'Free up to 10 users · ~$5/user/mo after'}</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+
+      <div className="doc-footer">
+        <div>PARTS-LOGGER · v0.1 · INTERNAL SOP</div>
+        <div>MARINESUPPLIESASIA.COM</div>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
